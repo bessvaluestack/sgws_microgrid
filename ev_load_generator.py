@@ -312,30 +312,238 @@ class EVLoadProfileGenerator:
         return self.sessions_to_load_profile(sessions, time_resolution_minutes)
 
 
+def get_predefined_scenarios():
+    """Define the three scenarios from CLAUDE.md."""
+    return {
+        'high': {
+            'name': 'High Load',
+            'description': '10 kW per port (14 kW max per pedestal) 8:30 AM - 5:30 PM business days',
+            'params': {
+                'charging_hours': (8.5, 17.5),
+                'energy_range': (70, 90),
+                'energy_mean': 80,
+                'delay_range': (0.1, 0.5),
+                'delay_mean': 0.25,
+                'weekdays_only': True
+            }
+        },
+        'medium': {
+            'name': 'Medium Load',
+            'description': '20-70 kWh per car, 0.25-1 hr between charges (0.66 hr mean)',
+            'params': {
+                'charging_hours': (8.5, 17.5),
+                'energy_range': (20, 70),
+                'energy_mean': 45,
+                'delay_range': (0.25, 1.0),
+                'delay_mean': 0.66,
+                'weekdays_only': True
+            }
+        },
+        'low': {
+            'name': 'Low Load',
+            'description': '15-50 kWh per car, 0.5-2 hr between charges (1.5 hr mean)',
+            'params': {
+                'charging_hours': (8.5, 17.5),
+                'energy_range': (15, 50),
+                'energy_mean': 32.5,
+                'delay_range': (0.5, 2.0),
+                'delay_mean': 1.5,
+                'weekdays_only': True
+            }
+        }
+    }
+
+
+def get_user_input(prompt, input_type=str, default=None, valid_options=None):
+    """Get user input with validation and optional default."""
+    while True:
+        user_input = input(prompt).strip()
+
+        if not user_input and default is not None:
+            return default
+
+        if not user_input:
+            print("Input required. Please try again.")
+            continue
+
+        try:
+            value = input_type(user_input)
+
+            if valid_options and value not in valid_options:
+                print(f"Invalid option. Choose from: {valid_options}")
+                continue
+
+            return value
+        except ValueError:
+            print(f"Invalid input. Expected {input_type.__name__}")
+            continue
+
+
+def get_custom_scenario_params():
+    """Get custom scenario parameters from user."""
+    print("\nCustom Scenario Configuration:")
+    print("=" * 50)
+
+    params = {}
+
+    print("\nCharging Hours:")
+    start_hour = get_user_input("  Start hour (24h format, e.g., 8.5 for 8:30 AM): ", float)
+    end_hour = get_user_input("  End hour (24h format, e.g., 17.5 for 5:30 PM): ", float)
+    params['charging_hours'] = (start_hour, end_hour)
+
+    print("\nEnergy per Session (kWh):")
+    min_energy = get_user_input("  Minimum energy: ", float)
+    max_energy = get_user_input("  Maximum energy: ", float)
+    mean_energy = get_user_input(f"  Mean energy (default {(min_energy+max_energy)/2:.1f}): ",
+                                 float, default=(min_energy+max_energy)/2)
+    params['energy_range'] = (min_energy, max_energy)
+    params['energy_mean'] = mean_energy
+
+    print("\nDelay Between Sessions (hours):")
+    min_delay = get_user_input("  Minimum delay: ", float)
+    max_delay = get_user_input("  Maximum delay: ", float)
+    mean_delay = get_user_input(f"  Mean delay (default {(min_delay+max_delay)/2:.1f}): ",
+                                float, default=(min_delay+max_delay)/2)
+    params['delay_range'] = (min_delay, max_delay)
+    params['delay_mean'] = mean_delay
+
+    weekdays = get_user_input("\nWeekdays only? (y/n, default y): ", str, default='y',
+                              valid_options=['y', 'n', 'yes', 'no'])
+    params['weekdays_only'] = weekdays.lower() in ['y', 'yes']
+
+    return params
+
+
 if __name__ == "__main__":
-    # Example usage with YAML config
     import sys
 
-    if len(sys.argv) > 1:
-        config_file = sys.argv[1]
-        generator = EVLoadProfileGenerator(config_file=config_file)
+    print("=" * 60)
+    print("EV Load Profile Generator - SGWS Microgrid Project")
+    print("=" * 60)
 
-        # Generate load profile for one week
-        start_date = datetime(2024, 1, 1)
-        end_date = datetime(2024, 1, 7)
+    # Get charging infrastructure configuration
+    port_configs = []
 
-        # Use medium scenario from config
-        load_profile = generator.generate_load_profile(
-            start_date=start_date,
-            end_date=end_date,
-            scenario='medium'
-        )
+    config_choice = get_user_input("\nUse YAML config file or manual setup? (yaml/manual, default manual): ",
+                                   str, default='manual', valid_options=['yaml', 'manual'])
 
-        print(f"Generated load profile with {len(load_profile)} time steps")
-        print(f"Peak load: {load_profile['total_load_kw'].max():.1f} kW")
-        print(f"Average load: {load_profile['total_load_kw'].mean():.1f} kW")
-        print("\nSample data:")
-        print(load_profile.head(10))
+    if config_choice == 'yaml':
+        config_file = get_user_input("Enter YAML config file path: ", str)
+        try:
+            generator = EVLoadProfileGenerator(config_file=config_file)
+        except FileNotFoundError:
+            print(f"Error: Config file '{config_file}' not found.")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error loading config: {e}")
+            sys.exit(1)
     else:
-        print("Usage: python ev_load_generator.py <config_file.yaml>")
-        print("Example config file needed with charging infrastructure and scenarios.")
+        print("\nDefault Configuration: 6 pedestals with 2 ports each (12 total ports)")
+        print("  - Max power per pedestal: 14 kW")
+        print("  - Max power per port: 10 kW")
+
+        use_default = get_user_input("Use default configuration? (y/n): ", str,
+                                     valid_options=['y', 'n', 'yes', 'no'])
+
+        if use_default.lower() in ['y', 'yes']:
+            port_configs = [
+                ChargingPortConfig(max_power_kw=14, port_limit_kw=10, num_ports=2)
+                for _ in range(6)
+            ]
+        else:
+            num_chargers = get_user_input("Number of charger pedestals: ", int)
+            for i in range(num_chargers):
+                print(f"\nPedestal {i+1}:")
+                max_power = get_user_input("  Max power (kW): ", float)
+                port_limit = get_user_input("  Per-port limit (kW): ", float)
+                num_ports = get_user_input("  Number of ports: ", int)
+                port_configs.append(ChargingPortConfig(max_power, port_limit, num_ports))
+
+        generator = EVLoadProfileGenerator(port_configs=port_configs)
+
+    print(f"\nTotal ports configured: {generator.total_ports}")
+
+    # Get date range
+    print("\nDate Range Configuration:")
+    print("-" * 30)
+
+    year = get_user_input("Year (default 2024): ", int, default=2024)
+    start_month = get_user_input("Start month (1-12): ", int)
+    start_day = get_user_input("Start day: ", int)
+
+    end_month = get_user_input("End month (1-12): ", int)
+    end_day = get_user_input("End day: ", int)
+
+    start_date = datetime(year, start_month, start_day)
+    end_date = datetime(year, end_month, end_day)
+
+    print(f"\nDate range: {start_date.date()} to {end_date.date()}")
+
+    # Get scenario selection
+    print("\nScenario Selection:")
+    print("-" * 30)
+
+    scenarios = get_predefined_scenarios()
+
+    print("\nAvailable scenarios:")
+    print("  1. High Load   - " + scenarios['high']['description'])
+    print("  2. Medium Load - " + scenarios['medium']['description'])
+    print("  3. Low Load    - " + scenarios['low']['description'])
+    print("  4. Custom      - Define your own parameters")
+
+    scenario_choice = get_user_input("\nSelect scenario (1-4): ", int, valid_options=[1, 2, 3, 4])
+
+    if scenario_choice == 1:
+        scenario_key = 'high'
+        scenario_params = scenarios['high']['params']
+        scenario_name = 'high_load'
+    elif scenario_choice == 2:
+        scenario_key = 'medium'
+        scenario_params = scenarios['medium']['params']
+        scenario_name = 'medium_load'
+    elif scenario_choice == 3:
+        scenario_key = 'low'
+        scenario_params = scenarios['low']['params']
+        scenario_name = 'low_load'
+    else:
+        scenario_key = 'custom'
+        scenario_params = get_custom_scenario_params()
+        scenario_name = get_user_input("\nEnter custom scenario name (for filename): ", str)
+
+    # Time resolution
+    time_resolution = get_user_input("\nTime resolution in minutes (default 15): ",
+                                     int, default=15)
+
+    # Generate load profile
+    print("\n" + "=" * 60)
+    print("Generating load profile...")
+
+    sessions = generator.generate_charging_sessions(
+        start_date=start_date,
+        end_date=end_date,
+        **scenario_params
+    )
+
+    load_profile = generator.sessions_to_load_profile(sessions, time_resolution)
+
+    # Statistics
+    print("\nGeneration Complete!")
+    print("-" * 30)
+    print(f"Scenario: {scenario_name}")
+    print(f"Date range: {start_date.date()} to {end_date.date()}")
+    print(f"Total charging sessions: {len(sessions)}")
+    print(f"Time steps: {len(load_profile)}")
+    print(f"Peak load: {load_profile['total_load_kw'].max():.1f} kW")
+    print(f"Average load: {load_profile['total_load_kw'].mean():.1f} kW")
+
+    if len(sessions) > 0:
+        total_energy = sum(s.energy_kwh for s in sessions)
+        print(f"Total energy delivered: {total_energy:.1f} kWh")
+
+    # Export
+    filename = f"ev_load_{scenario_name}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.csv"
+    load_profile.to_csv(filename, index=False)
+    print(f"\nLoad profile exported to: {filename}")
+
+    print("\nSample data (first 10 rows):")
+    print(load_profile.head(10).to_string())
