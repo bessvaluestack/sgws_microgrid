@@ -1,6 +1,6 @@
 from pathlib import Path
 import pandas as pd
-from battery_offgrid_sim_v4 import read_pv_timeseries, read_load_timeseries, BatteryConfig, simulate_offgrid_dispatch
+from battery_offgrid_sim import read_pv_timeseries, read_load_timeseries, BatteryConfig, simulate_offgrid_dispatch
 
 def run_capacity_sweep(
     pv_path: str,
