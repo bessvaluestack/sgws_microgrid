@@ -51,9 +51,9 @@ scenarios:
     description: "Low load scenario - employee charging with light usage"
     charging_hours: [8.5, 17.5]  # 8:30 AM - 5:30 PM
     energy_per_session:
-      range: [15, 50]
-      mean: 32.5
+      range: [20, 60]
+      mean: 40
     delay_between_sessions:
-      range: [0.5, 2.0]
-      mean: 1.5
+      range: [0.5, 1.5]
+      mean: 1.0
     weekdays_only: true

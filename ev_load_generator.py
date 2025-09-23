@@ -163,8 +163,10 @@ class EVLoadProfileGenerator:
                 energy_range[1]
             )
 
-            # Calculate charging power and duration
-            power_kw = min(port_config.port_limit_kw, port_config.max_power_kw)
+            # Calculate charging power considering charger constraints
+            # Note: This is the initial power calculation. Actual power may vary during
+            # the session based on other concurrent sessions on the same charger.
+            power_kw = self._calculate_available_power(port_id, current_time, sessions)
             duration_hours = energy_kwh / power_kw
 
             # Create session
@@ -209,6 +211,53 @@ class EVLoadProfileGenerator:
             current_port += config.num_ports
         raise ValueError(f"Port ID {port_id} not found")
 
+    def _get_charger_info(self, port_id: int) -> Tuple[int, int]:
+        """Get charger index and port index within charger for a specific port ID."""
+        current_port = 0
+        for charger_idx, config in enumerate(self.port_configs):
+            if current_port <= port_id < current_port + config.num_ports:
+                port_idx_in_charger = port_id - current_port
+                return charger_idx, port_idx_in_charger
+            current_port += config.num_ports
+        raise ValueError(f"Port ID {port_id} not found")
+
+    def _get_charger_ports(self, charger_idx: int) -> List[int]:
+        """Get all port IDs for a specific charger."""
+        current_port = 0
+        for i, config in enumerate(self.port_configs):
+            if i == charger_idx:
+                return list(range(current_port, current_port + config.num_ports))
+            current_port += config.num_ports
+        raise ValueError(f"Charger index {charger_idx} not found")
+
+    def _calculate_available_power(self, port_id: int, current_time: datetime, existing_sessions: List[ChargingSession]) -> float:
+        """Calculate available power for a port considering charger constraints."""
+        port_config = self._get_port_config(port_id)
+        charger_idx, _ = self._get_charger_info(port_id)
+        charger_ports = self._get_charger_ports(charger_idx)
+
+        # Find concurrent sessions on the same charger
+        concurrent_sessions = []
+        for session in existing_sessions:
+            if (session.port_id in charger_ports and
+                session.start_time <= current_time < session.end_time):
+                concurrent_sessions.append(session)
+
+        # Calculate how many ports will be in use (including this new session)
+        ports_in_use = len(concurrent_sessions) + 1
+
+        # Calculate available power per port
+        if ports_in_use == 1:
+            # Only one port in use, can use up to port limit or charger max
+            available_power = min(port_config.port_limit_kw, port_config.max_power_kw)
+        else:
+            # Multiple ports in use, share charger max power
+            available_power = port_config.max_power_kw / ports_in_use
+            # But don't exceed individual port limit
+            available_power = min(available_power, port_config.port_limit_kw)
+
+        return available_power
+
     def _generate_truncated_normal(self, mean: float, std: float, min_val: float, max_val: float) -> float:
         """Generate a value from truncated normal distribution."""
         while True:
@@ -222,7 +271,7 @@ class EVLoadProfileGenerator:
         time_resolution_minutes: int = 15
     ) -> pd.DataFrame:
         """
-        Convert charging sessions to a time-series load profile.
+        Convert charging sessions to a time-series load profile with dynamic power allocation.
 
         Args:
             sessions: List of charging sessions
@@ -251,14 +300,41 @@ class EVLoadProfileGenerator:
             'total_load_kw': 0.0
         })
 
-        # Add each session to the profile
-        for session in sessions:
-            # Find time slots that overlap with the session
-            session_mask = (
-                (load_profile['timestamp'] >= session.start_time) &
-                (load_profile['timestamp'] < session.end_time)
-            )
-            load_profile.loc[session_mask, 'total_load_kw'] += session.power_kw
+        # For each time slot, calculate the actual power considering charger constraints
+        for i, timestamp in enumerate(time_index):
+            total_load = 0.0
+
+            # Find all active sessions at this timestamp
+            active_sessions = [
+                session for session in sessions
+                if session.start_time <= timestamp < session.end_time
+            ]
+
+            # Group sessions by charger and calculate actual power
+            charger_sessions = {}
+            for session in active_sessions:
+                charger_idx, _ = self._get_charger_info(session.port_id)
+                if charger_idx not in charger_sessions:
+                    charger_sessions[charger_idx] = []
+                charger_sessions[charger_idx].append(session)
+
+            # Calculate power for each charger considering constraints
+            for charger_idx, charger_active_sessions in charger_sessions.items():
+                charger_config = self.port_configs[charger_idx]
+                ports_in_use = len(charger_active_sessions)
+
+                if ports_in_use == 1:
+                    # Single port: use up to port limit or charger max
+                    power_per_port = min(charger_config.port_limit_kw, charger_config.max_power_kw)
+                else:
+                    # Multiple ports: share charger max power
+                    power_per_port = charger_config.max_power_kw / ports_in_use
+                    # But don't exceed individual port limit
+                    power_per_port = min(power_per_port, charger_config.port_limit_kw)
+
+                total_load += power_per_port * ports_in_use
+
+            load_profile.loc[i, 'total_load_kw'] = total_load
 
         return load_profile
 
@@ -296,13 +372,13 @@ class EVLoadProfileGenerator:
             weekdays_only = weekdays_only if weekdays_only is not None else scenario_config.get('weekdays_only', True)
 
         # Use defaults if still None
-        charging_hours = charging_hours or (8.5, 17.5)
-        energy_range = energy_range or (20, 70)
-        energy_mean = energy_mean or 45
-        delay_range = delay_range or (0.25, 1.0)
-        delay_mean = delay_mean or 0.66
+        charging_hours = charging_hours# or (8.5, 17.5)
+        energy_range = energy_range# or (20, 70)
+        energy_mean = energy_mean# or 45
+        delay_range = delay_range# or (0.25, 1.0)
+        delay_mean = delay_mean# or 0.66
         weekdays_only = weekdays_only if weekdays_only is not None else True
-        time_resolution_minutes = time_resolution_minutes or 15
+        time_resolution_minutes = time_resolution_minutes# or 15
 
         sessions = self.generate_charging_sessions(
             start_date, end_date, charging_hours, energy_range, energy_mean,
@@ -310,48 +386,6 @@ class EVLoadProfileGenerator:
         )
 
         return self.sessions_to_load_profile(sessions, time_resolution_minutes)
-
-
-def get_predefined_scenarios():
-    """Define the three scenarios from CLAUDE.md."""
-    return {
-        'high': {
-            'name': 'High Load',
-            'description': '10 kW per port (14 kW max per pedestal) 8:30 AM - 5:30 PM business days',
-            'params': {
-                'charging_hours': (8.5, 17.5),
-                'energy_range': (70, 90),
-                'energy_mean': 80,
-                'delay_range': (0.1, 0.5),
-                'delay_mean': 0.25,
-                'weekdays_only': True
-            }
-        },
-        'medium': {
-            'name': 'Medium Load',
-            'description': '20-70 kWh per car, 0.25-1 hr between charges (0.66 hr mean)',
-            'params': {
-                'charging_hours': (8.5, 17.5),
-                'energy_range': (20, 70),
-                'energy_mean': 45,
-                'delay_range': (0.25, 1.0),
-                'delay_mean': 0.66,
-                'weekdays_only': True
-            }
-        },
-        'low': {
-            'name': 'Low Load',
-            'description': '15-50 kWh per car, 0.5-2 hr between charges (1.5 hr mean)',
-            'params': {
-                'charging_hours': (8.5, 17.5),
-                'energy_range': (15, 50),
-                'energy_mean': 32.5,
-                'delay_range': (0.5, 2.0),
-                'delay_mean': 1.5,
-                'weekdays_only': True
-            }
-        }
-    }
 
 
 def get_user_input(prompt, input_type=str, default=None, valid_options=None):
@@ -483,7 +517,18 @@ if __name__ == "__main__":
     print("\nScenario Selection:")
     print("-" * 30)
 
-    scenarios = get_predefined_scenarios()
+    # Load scenarios from YAML config or use generator's config if available
+    if hasattr(generator, 'config') and 'scenarios' in generator.config:
+        scenarios = generator.config['scenarios']
+    else:
+        # Load from default config file if generator doesn't have scenarios
+        try:
+            with open('ev_config.yaml', 'r') as f:
+                config = yaml.safe_load(f)
+                scenarios = config['scenarios']
+        except FileNotFoundError:
+            print("Error: No scenarios available. Please ensure ev_config.yaml exists or use YAML config mode.")
+            sys.exit(1)
 
     print("\nAvailable scenarios:")
     print("  1. High Load   - " + scenarios['high']['description'])
@@ -495,19 +540,19 @@ if __name__ == "__main__":
 
     if scenario_choice == 1:
         scenario_key = 'high'
-        scenario_params = scenarios['high']['params']
+        scenario_config = scenarios['high']
         scenario_name = 'high_load'
     elif scenario_choice == 2:
         scenario_key = 'medium'
-        scenario_params = scenarios['medium']['params']
+        scenario_config = scenarios['medium']
         scenario_name = 'medium_load'
     elif scenario_choice == 3:
         scenario_key = 'low'
-        scenario_params = scenarios['low']['params']
+        scenario_config = scenarios['low']
         scenario_name = 'low_load'
     else:
         scenario_key = 'custom'
-        scenario_params = get_custom_scenario_params()
+        scenario_config = None
         scenario_name = get_user_input("\nEnter custom scenario name (for filename): ", str)
 
     # Time resolution
@@ -518,11 +563,29 @@ if __name__ == "__main__":
     print("\n" + "=" * 60)
     print("Generating load profile...")
 
-    sessions = generator.generate_charging_sessions(
-        start_date=start_date,
-        end_date=end_date,
-        **scenario_params
-    )
+    if scenario_config:
+        # Extract parameters from YAML scenario config
+        scenario_params = {
+            'charging_hours': tuple(scenario_config['charging_hours']),
+            'energy_range': tuple(scenario_config['energy_per_session']['range']),
+            'energy_mean': scenario_config['energy_per_session']['mean'],
+            'delay_range': tuple(scenario_config['delay_between_sessions']['range']),
+            'delay_mean': scenario_config['delay_between_sessions']['mean'],
+            'weekdays_only': scenario_config.get('weekdays_only', True)
+        }
+        sessions = generator.generate_charging_sessions(
+            start_date=start_date,
+            end_date=end_date,
+            **scenario_params
+        )
+    else:
+        # Custom scenario - get parameters from user input
+        scenario_params = get_custom_scenario_params()
+        sessions = generator.generate_charging_sessions(
+            start_date=start_date,
+            end_date=end_date,
+            **scenario_params
+        )
 
     load_profile = generator.sessions_to_load_profile(sessions, time_resolution)
 
