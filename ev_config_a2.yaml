@@ -1,0 +1,47 @@
+# EV Charging Load Profile Configuration
+
+# Charging Infrastructure Configuration
+charging_infrastructure:
+  # 2 dual-port chargers (12 ports total)
+  # Each charger has 14 kW max power with 10 kW limit per port
+  - max_power_kw: 14
+    port_limit_kw: 10
+    num_ports: 2
+  - max_power_kw: 14
+    port_limit_kw: 10
+    num_ports: 2
+
+# Load Scenarios
+scenarios:
+  high:
+    description: "High load scenario - 10 kW per port during business hours"
+    charging_hours: [8, 17.5]  # 8:30 AM - 5:30 PM
+    energy_per_session:
+      range: [50, 80]
+      mean: 65
+    delay_between_sessions:
+      range: [0.1, 0.5]
+      mean: 0.25
+    weekdays_only: true
+
+  medium:
+    description: "Medium load scenario - employee charging with moderate usage"
+    charging_hours: [8, 17.5]  # 8:30 AM - 5:30 PM
+    energy_per_session:
+      range: [20, 70]
+      mean: 45
+    delay_between_sessions:
+      range: [0.25, 1.0]
+      mean: 0.66
+    weekdays_only: true
+
+  low:
+    description: "Low load scenario - employee charging with light usage"
+    charging_hours: [8, 17.5]  # 8:30 AM - 5:30 PM
+    energy_per_session:
+      range: [20, 60]
+      mean: 40
+    delay_between_sessions:
+      range: [0.5, 1.5]
+      mean: 1.0
+    weekdays_only: true
